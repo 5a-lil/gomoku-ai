@@ -113,7 +113,7 @@ impl Board {
             let mut down: usize = played_index;
             while self._board_states[down] == played {
                 ver_count += 1;
-                if down as u16 + self._cols >= self._cols * self._cols {
+                if down as u16 + self._cols > self._cols * self._cols {
                     break;
                 }
                 down += self._cols as usize;
