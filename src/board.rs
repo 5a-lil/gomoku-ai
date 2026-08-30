@@ -1,16 +1,19 @@
 use std::{cell, rc::Rc, thread::sleep, time::Duration};
 
 use ratatui::{
-    DefaultTerminal, Frame, buffer::{Buffer}, layout::{self, Alignment, Constraint, Direction, Layout, Position, Rect}, style::{Color, Style, Stylize}, symbols::block, widgets::{Block, BorderType, Borders, Clear, Paragraph, Row, Widget},
+    DefaultTerminal, Frame, buffer::Buffer, layout::{self, Alignment, Constraint, Direction, Layout, Position, Rect}, style::{Color, Style, Stylize}, symbols::block, text::Line, widgets::{Block, BorderType, Borders, Clear, Paragraph, Row, Widget},
 };
 
 use crossterm::event::{self, KeyCode};
+
+use chrono::{Timelike, Utc};
 
 const BOARD_SIZE: u16 = 19;
 const HOR_SIZE: u16 = 4;
 const VER_SIZE: u16 = 2;
 const WIN_COND: i16 = 5;
 const NO_CAPTURE: usize = 9250;
+const CAPTURE_WIN_NUMBER: u8 = 5;
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct Capture {
@@ -120,6 +123,16 @@ pub enum State {
     White
 }
 
+impl std::fmt::Display for State {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            State::Black => write!(f, "Black"),
+            State::White => write!(f, "White"),
+            State::Empty => write!(f, "Empty"),
+        }
+    }
+}
+
 impl State {
     pub fn opposite(&self) -> State {
         match self {
@@ -138,8 +151,8 @@ impl State {
 
 type Playing = State;
 
-#[derive(Debug, Copy, Clone)]
-pub struct Board {
+#[derive(Debug, Clone)]
+pub struct Board<'a> {
     _board_states: [Cell; (BOARD_SIZE * BOARD_SIZE) as usize],
     _board_areas: [Rect; (BOARD_SIZE * BOARD_SIZE) as usize],
     pub _cols: u16,
@@ -149,9 +162,11 @@ pub struct Board {
     pub _area: u16,
     _mouse_position: (u16, u16),
     _playing: State,
+    _player_captures: (u8, u8),
+    pub _log_lines: Vec<Line<'a>>,
 } 
 
-impl Board {
+impl Board<'_> {
     pub fn new() -> Self {
         Board {
             _board_states: [Cell::new(); (BOARD_SIZE * BOARD_SIZE) as usize],
@@ -163,7 +178,26 @@ impl Board {
             _area: BOARD_SIZE * BOARD_SIZE,
             _mouse_position: (0, 0),
             _playing: Playing::Black,
+            _player_captures: (0, 0),
+            _log_lines: Vec::new(),
         }
+    }
+
+    fn win(&mut self) {
+        self.log(format!("🎉🎉🎉  {} won ! 🎉🎉🎉", self._playing));
+        self.log(format!("Press [q] to quit or [r] to restart a game"));
+        self._playing = Playing::Empty
+    }
+
+    fn draw(&mut self) {
+        todo!();
+    }
+
+    pub fn log(&mut self, log: String) {
+        let actual_time = Utc::now();
+        let log_time = format!("{:02}:{:02}:{:02}", actual_time.hour(), actual_time.minute(), actual_time.second());
+        let log = format!("[{}] - {log}", log_time);
+        self._log_lines.insert(0, Line::from(log))
     }
 
     pub fn handle_mouse_move(&mut self, col: u16, row: u16) {
@@ -172,6 +206,9 @@ impl Board {
         //     return;
         // }
 
+        // if self._playing != State::Empty {
+        //     self.log(format!("{} - {}", col, row));
+        // }
         self._mouse_position = (col, row)
     }
 
@@ -186,8 +223,11 @@ impl Board {
                 if self.double_free_three(i) {
                     return;
                 }
-                self._board_states[i].state = self.play();
+
+                self.log(format!("{} at [x: {}, y: {}]", self._playing, i % self._cols as usize, (i - (i % self._cols as usize)) / self._cols as usize));
+                self._board_states[i].state = self._playing; //placing the pawn
                 self.check_game(i);
+                self._playing = self._playing.opposite();
                 return;
             }
         }
@@ -365,10 +405,71 @@ impl Board {
 
     fn check_game(&mut self, played_index: usize) {
         self.check_lines(played_index);
-        self.check_captures(played_index);
+        if self._playing == Playing::Empty {
+            return
+        }
+        self.check_possible_captures(played_index);
+        if self._playing == Playing::Empty {
+            return
+        }
+        self.check_captures_count();
+        if self._playing == Playing::Empty {
+            return
+        }
+        self.check_draw();
+        if self._playing == Playing::Empty {
+            return
+        }
     }
 
-    fn check_captures(&mut self, played_index: usize) {
+    fn check_draw(&mut self) {
+        for elem in self._board_states {
+            if elem.state == State::Empty && elem.playable(self._playing) {
+                return
+            }
+        }
+        self.draw();
+    }
+
+    fn check_captures_count(&mut self) {
+        match self._playing {
+            Playing::Black => {
+                if self._player_captures.0 == CAPTURE_WIN_NUMBER - 1 {
+                    for (index, _) in self._board_states.into_iter().enumerate() {
+                        if self._board_states[index].state != self._playing.opposite() {
+                            continue;
+                        }
+                        if self.is_capturable(index) {
+                            self.win();
+                            return;
+                        }
+                    }
+                }
+                else if self._player_captures.0 >= CAPTURE_WIN_NUMBER {
+                    self.win()
+                }
+            },
+            Playing::White => {
+                if self._player_captures.1 == CAPTURE_WIN_NUMBER - 1 {
+                    for (index, _) in self._board_states.into_iter().enumerate() {
+                        if self._board_states[index].state != self._playing.opposite() {
+                            continue;
+                        }
+                        if self.is_capturable(index) {
+                            self.win();
+                            return;
+                        }
+                    }
+                }
+                else if self._player_captures.1 >= CAPTURE_WIN_NUMBER {
+                    self.win()
+                }
+            },
+            _ => {},
+        }
+    }
+
+    fn check_possible_captures(&mut self, played_index: usize) {
         let played: State = self._board_states[played_index].state;
 
         fn process_capture(board: &mut Board, played_index: usize, played: State, tester: usize, diff: i16) {
@@ -380,14 +481,29 @@ impl Board {
             board._board_states[tester].capture(played_index, first, second);
             board._board_states[first].captured.incr(played);
             board._board_states[second].captured.incr(played);
-            if board._board_states[first].state == board._board_states[second].state && board._board_states[first].state != played {
-                println!("release");
+            if board._board_states[first].state == board._board_states[second].state && board._board_states[first].state == played.opposite() {
+                board.log(format!("{} takes pawns", board._playing));    
                 board.release_capture(first);
                 board.release_capture(second);
                 board._board_states[first].state = State::Empty;
                 board._board_states[second].state = State::Empty;
+                match played {
+                    State::Black => {
+                        board._player_captures.0 += 1
+                    },
+                    State::White => {
+                        board._player_captures.1 += 1
+                    },
+                    _ => {}
+                }
             }
-            println!("captured !!");
+            board.log(format!("{} captured [x: {}][y: {}] and [x: {}][y: {}]", 
+                board._playing, 
+                first % board._cols as usize,
+                (first - (first % board._cols as usize)) / board._cols as usize,
+                second % board._cols as usize,
+                (second - (second % board._cols as usize)) / board._cols as usize,
+            ));
         }
 
         //left
@@ -404,7 +520,6 @@ impl Board {
             if self._board_states[tester].state != played {
                 return;
             }
-
 
             process_capture(self, played_index, played, tester, 2);
         })();
@@ -548,7 +663,7 @@ impl Board {
             if scnd_origin_index == NO_CAPTURE {
                 continue;
             }
-            println!("RELEASE");
+            // println!("RELEASE");
             // enlever les captures des listes des deux cells
             let to_release = self._board_states[scnd_origin_index].delete_capture(origin_index);
             // diminuer la valeur de captured pour les deux cells capture
@@ -558,7 +673,7 @@ impl Board {
         self._board_states[origin_index].clear_all_captures()
     }
 
-    fn is_capturable(&self, played_index: usize) -> bool {
+    fn is_capturable(&mut self, played_index: usize) -> bool {
         let mut possibles = 0;
 
         fn process<F1, F2, F3, F4>(
@@ -760,9 +875,9 @@ impl Board {
             }
         );
         
-        if possibles > 0 {
-            println!("c CAPTURABLE");
-        }
+        // if possibles > 0 {
+        //     self.log(String::from("La ligne est interrompable par capture"));
+        // }
 
         possibles > 0
     }
@@ -774,25 +889,25 @@ impl Board {
         let mut hor_count: i16 = 0;
         {
             let mut left: i16 = played_index as i16;
-            while self._board_states[left as usize].state == played {
-                if self.is_capturable(left as usize) || (left + 1) % self._cols as i16 == 0 {
-                    break;
-                }
+            while self._board_states[left as usize].state == played && !(self.is_capturable(left as usize)) {
                 hor_count += 1;
                 left -= 1;
+                if (left + 1) % self._cols as i16 == 0 {
+                    break
+                }
             }
 
             let mut right: i16 = played_index as i16;
-            while self._board_states[right as usize].state == played {
-                if self.is_capturable(right as usize) || right % self._cols as i16 == 0 {
-                    break;
-                }
+            while self._board_states[right as usize].state == played && !(self.is_capturable(right as usize)){
                 hor_count += 1;
                 right += 1;
+                if right % self._cols as i16 == 0 {
+                    break
+                }
             }
 
             if hor_count - 1 >= WIN_COND {
-                self._playing = Playing::Empty;
+                self.win();
                 return
             }
         }
@@ -801,25 +916,25 @@ impl Board {
         let mut ver_count: i16 = 0;
         {
             let mut up: i16 = played_index as i16;
-            while self._board_states[up as usize].state == played {
-                if self.is_capturable(up as usize) || up < 0 {
-                    break;
-                }
+            while self._board_states[up as usize].state == played && !(self.is_capturable(up as usize)) {
                 ver_count += 1;
                 up -= self._cols as i16;
+                if up < 0 {
+                    break
+                }
             }
 
             let mut down: usize = played_index;
-            while self._board_states[down].state == played {
-                if self.is_capturable(down) || down as u16 >= self._cols * self._cols {
-                    break;
-                }
+            while self._board_states[down].state == played && !(self.is_capturable(down)) {
                 ver_count += 1;
                 down += self._cols as usize;
+                if down as u16 >= self._cols * self._cols {
+                    break
+                }
             }
 
             if ver_count - 1 >= WIN_COND {
-                self._playing = Playing::Empty;
+                self.win();
                 return
             }
         }
@@ -828,70 +943,60 @@ impl Board {
         let mut up_left_diag_count: i16 = 0;
         {
             let mut up: i16 = played_index as i16;
-            while self._board_states[up as usize].state == played {
-                if self.is_capturable(up as usize) || up < 0 || (up + 1) % self._cols as i16 == 0 {
-                    break;
-                }
+            while self._board_states[up as usize].state == played && !(self.is_capturable(up as usize)) {
                 up_left_diag_count += 1;
                 let futur_move = up as i16 - self._cols as i16 - 1;
                 up = futur_move as i16;
+                if up < 0 || (up + 1) % self._cols as i16 == 0 {
+                    break
+                }
             }
 
             let mut down: i16 = played_index as i16;
-            while self._board_states[down as usize].state == played {
-                if self.is_capturable(down as usize) || down >= self._area as i16 || down % self._cols as i16 == 0 {
-                    break;
-                }
+            while self._board_states[down as usize].state == played && !(self.is_capturable(down as usize)) {
                 up_left_diag_count += 1;
                 let futur_move = down as u16 + self._cols + 1;
                 down = futur_move as i16;
+                if down >= self._area as i16 || down % self._cols as i16 == 0 {
+                    break
+                }
             }
 
             if up_left_diag_count - 1 >= WIN_COND {
-                self._playing = Playing::Empty;
+                self.win();
                 return
             }
         }
 
-        // up right going diags
+        // // up right going diags
         let mut up_right_diag_count: i16 = 0;
         {
             let mut up: i16 = played_index as i16;
-            while self._board_states[up as usize].state == played {
-                if self.is_capturable(up as usize) || up < 0 || up % self._cols as i16 == 0 {
-                    break;
-                }
+            while self._board_states[up as usize].state == played && !(self.is_capturable(up as usize)) {
                 up_right_diag_count += 1;
                 let futur_move = up as i16 - self._cols as i16 + 1;
                 up = futur_move as i16;
+                if up < 0 || up % self._cols as i16 == 0 {
+                    break
+                }
             }
 
             let mut down: i16 = played_index as i16;
-            while self._board_states[down as usize].state == played {
-                if self.is_capturable(down as usize) || down >= self._area as i16 || (down + 1) % self._cols as i16 == 0 {
-                    break;
-                }
+            while self._board_states[down as usize].state == played && !(self.is_capturable(down as usize)) {
                 up_right_diag_count += 1;
                 let futur_move = down as u16 + self._cols - 1;
                 down = futur_move as i16;
+                if down >= self._area as i16 || (down + 1) % self._cols as i16 == 0 {
+                    break
+                }
             }
 
             if up_right_diag_count - 1 >= WIN_COND {
-                self._playing = Playing::Empty;
+                self.win();
                 return
             }
         }
 
-    }
-
-    fn play(&mut self) -> State {
-        if self._playing == Playing::White {
-            self._playing = Playing::Black;
-            State::White
-        } else {
-            self._playing = Playing::White;
-            State::Black
-        }
     }
 
     pub fn init_areas(&mut self, area: Rect) {
@@ -910,23 +1015,23 @@ impl Board {
     }
 }
 
-impl Widget for Board {
+impl Widget for Board<'_> {
     fn render(self, _: Rect, buf: &mut Buffer) {
         for (i, c) in self._board_areas.iter().enumerate() {
 
             match self._board_states[i].state {
                 State::Black => {
-                    Block::bordered().border_type(BorderType::Rounded).bg(Color::Blue).render(*c, buf);
+                    Block::bordered().border_type(BorderType::Rounded).bg(Color::Black).fg(Color::Black).render(*c, buf);
                 },
                 State::White => {
-                    Block::bordered().border_type(BorderType::Rounded).bg(Color::Red).render(*c, buf);
+                    Block::bordered().border_type(BorderType::Rounded).bg(Color::White).fg(Color::White).render(*c, buf);
                 },
                 _ => {
                     if c.contains(ratatui::prelude::Position::new(self._mouse_position.0, self._mouse_position.1)) {
                         Block::bordered().border_type(BorderType::Rounded).bg(Color::Yellow).render(*c, buf);
                         continue;
                     }
-                    Block::bordered().border_type(BorderType::Rounded).render(*c, buf);
+                    Block::bordered().border_type(BorderType::Rounded).bg(Color::DarkGray).render(*c, buf);
                 }
             }
         }
