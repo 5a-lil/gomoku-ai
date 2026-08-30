@@ -53,15 +53,20 @@ impl App {
     }
 
     fn render_ui(&mut self, frame: &mut Frame) {
+        let halves = Layout::horizontal([
+            Constraint::Percentage(50),
+            Constraint::Percentage(50),
+        ]).split(frame.area());
+
         // render le cadre exterieur
         let main_block = Block::bordered()
             .title_top("Haut")
             .title_bottom("Bas")
             .title_alignment(Alignment::Center);
-        frame.render_widget(main_block, frame.area());
+        frame.render_widget(main_block, halves[0]);
 
         // render le board
-        let center_area = frame.area().centered(
+        let center_area = halves[1].centered(
             Constraint::Length(self._board._ui_hor_size * self._board._cols),
              Constraint::Length(self._board._ui_ver_size * self._board._rows),
         );
