@@ -1,5 +1,5 @@
 [package]
-name = "tictactoe-boosted-tui-hover-choosing"
+name = "gomoku"
 version = "0.1.0"
 edition = "2024"
 

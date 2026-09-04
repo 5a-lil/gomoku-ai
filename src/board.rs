@@ -1,7 +1,7 @@
 use std::{cell, rc::Rc, thread::sleep, time::Duration};
 
 use ratatui::{
-    DefaultTerminal, Frame, buffer::Buffer, layout::{self, Alignment, Constraint, Direction, Layout, Position, Rect}, style::{Color, Style, Stylize}, symbols::block, text::Line, widgets::{Block, BorderType, Borders, Clear, Paragraph, Row, Widget},
+    DefaultTerminal, Frame, buffer::Buffer, layout::{self, Alignment, Constraint, Direction, Layout, Position, Rect}, style::{Color, Style, Stylize}, symbols::block, text::{Line, Span}, widgets::{Block, BorderType, Borders, Clear, Paragraph, Row, Widget},
 };
 
 use crossterm::event::{self, KeyCode};
@@ -14,6 +14,38 @@ const VER_SIZE: u16 = 2;
 const WIN_COND: i16 = 5;
 const NO_CAPTURE: usize = 9250;
 const CAPTURE_WIN_NUMBER: u8 = 5;
+
+pub struct Ai;
+
+impl Ai {
+    const MIN_START: i32 = -92;
+    const MAX_START: i32 = -92;
+
+    pub fn minimax(board: &mut Board, depth: u8, maximizing: bool) -> usize {
+        //game condition if won drow or somethin
+
+        if maximizing {
+            let mut best_score = Self::MIN_START;
+            // boucle for pour placer le pion sur chaque case et lance le minimax recurs
+                // place stone
+                let score = Self::minimax(board, depth + 1, !maximizing);
+                // rollback the move
+                best_score = std::cmp::max(score as i32, best_score);
+            //
+            best_score as usize
+        }
+        else {
+            let mut best_score = Self::MAX_START;
+            // boucle for pour placer le pion sur chaque case et lance le minimax recurs
+                // place stone
+                let score = Self::minimax(board, depth + 1, !maximizing);
+                // rollback the move
+                best_score = std::cmp::min(score as i32, best_score);
+            //
+            best_score as usize
+        }
+    }
+}
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct Capture {
@@ -75,6 +107,7 @@ pub struct Cell {
     pub state: State,
     pub captured: Captured,
     pub captures: [Capture; 8],
+    pub virtual_capturer: [Option<(usize, usize)>; 8],
 }
 
 impl Cell {
@@ -83,6 +116,7 @@ impl Cell {
             state: State::Empty,
             captured: Captured::default(),
             captures: [Capture {other: NO_CAPTURE, first: NO_CAPTURE, second: NO_CAPTURE}; 8],
+            virtual_capturer: [None; 8],
         }
     }
 
@@ -113,6 +147,20 @@ impl Cell {
 
     pub fn capture(&mut self, other: usize, first: usize, second: usize) {
         *(self.captures.iter_mut().find(|elem| elem.other == NO_CAPTURE).unwrap()) = Capture::new(other, first, second);
+    }
+
+    pub fn virtual_capturing_add(&mut self, index1: usize, index2: usize) {
+        for i in self.virtual_capturer.iter_mut() {
+            if let Some(indexes) = i {
+                if (index1, index2) == *indexes {
+                    return;
+                }
+            }
+            else {
+                *i = Some((index1, index2));
+                return
+            }
+        }
     }
 }
 
@@ -160,10 +208,12 @@ pub struct Board<'a> {
     pub _ui_hor_size: u16,
     pub _ui_ver_size: u16,
     pub _area: u16,
-    _mouse_position: (u16, u16),
-    _playing: State,
+    pub _mouse_position: (u16, u16),
+    pub _playing: State,
     _player_captures: (u8, u8),
     pub _log_lines: Vec<Line<'a>>,
+    pub _computation_time: i64,
+    pub _ai: bool,
 } 
 
 impl Board<'_> {
@@ -180,6 +230,8 @@ impl Board<'_> {
             _playing: Playing::Black,
             _player_captures: (0, 0),
             _log_lines: Vec::new(),
+            _computation_time: 0,
+            _ai: false,
         }
     }
 
@@ -190,14 +242,33 @@ impl Board<'_> {
     }
 
     fn draw(&mut self) {
-        todo!();
+        self.log("Draw....".into());
+        self.log(format!("Press [q] to quit or [r] to restart a game"));
+        self._playing = Playing::Empty
     }
 
     pub fn log(&mut self, log: String) {
-        let actual_time = Utc::now();
+        let actual_time = Utc::now().with_timezone(&chrono::FixedOffset::east_opt(2 * 60 * 60).unwrap());
         let log_time = format!("{:02}:{:02}:{:02}", actual_time.hour(), actual_time.minute(), actual_time.second());
-        let log = format!("[{}] - {log}", log_time);
-        self._log_lines.insert(0, Line::from(log))
+        let mut icon = Span::from("  ");
+        let mut captures: String = String::from("undefined");
+        match self._playing {
+            State::Black => {
+                icon = icon.on_black();
+                captures = format!("{}", self._player_captures.0)
+            },
+            State::White => {
+                icon = icon.white().on_white();
+                captures = format!("{}", self._player_captures.1)
+            },
+            _ => {},
+        }
+        self._log_lines.insert(0, Line::from(vec![
+            format!("[{log_time}] - [").into(),
+            icon,
+            format!("|{} captures] ", captures).into(),
+            log.into(),
+        ]))
     }
 
     pub fn handle_mouse_move(&mut self, col: u16, row: u16) {
@@ -221,15 +292,714 @@ impl Board<'_> {
         for (i, a) in self._board_areas.iter().enumerate() {
             if a.contains(Position::new(self._mouse_position.0, self._mouse_position.1)) && self._board_states[i].playable(self._playing) {
                 if self.double_free_three(i) {
+                    self.log(format!("Double three error"));
                     return;
                 }
 
                 self.log(format!("{} at [x: {}, y: {}]", self._playing, i % self._cols as usize, (i - (i % self._cols as usize)) / self._cols as usize));
-                self._board_states[i].state = self._playing; //placing the pawn
+                self._board_states[i].state = self._playing; //placing the stone
+                self.virtual_decapturing(i);
+                self._computation_time = Utc::now().timestamp_millis();
                 self.check_game(i);
+                self._computation_time = Utc::now().timestamp_millis() - self._computation_time;
                 self._playing = self._playing.opposite();
+                break;
+            }
+        }
+
+        if self._ai {
+            todo!("ai play")
+        }
+    }
+
+    fn virtual_decapturing(&mut self, index: usize) {
+
+        for (i, elem) in self._board_states[index].virtual_capturer.into_iter().enumerate() {
+            if let Some((index1, index2)) = elem {
+                self.check_game(index1);
+                self.check_game(index2);
+            }
+            self._board_states[index].virtual_capturer[i] = None
+        }
+    }
+
+    fn check_game(&mut self, played_index: usize) {
+        if self._playing == Playing::Empty {
+            return
+        }
+        self.check_lines(played_index);
+        if self._playing == Playing::Empty {
+            return
+        }
+        self.check_possible_captures(played_index);
+        if self._playing == Playing::Empty {
+            return
+        }
+        self.check_captures_count();
+        if self._playing == Playing::Empty {
+            return
+        }
+        self.check_draw();
+    }
+
+    fn check_draw(&mut self) {
+        for elem in self._board_states {
+            if elem.state == State::Empty && elem.playable(self._playing) {
+                return
+            }
+        }
+        self.draw();
+    }
+
+    fn check_captures_count(&mut self) {
+        match self._playing {
+            Playing::Black => {
+                if self._player_captures.0 == CAPTURE_WIN_NUMBER - 1 {
+                    for (index, _) in self._board_states.into_iter().enumerate() {
+                        if self._board_states[index].state != self._playing.opposite() {
+                            continue;
+                        }
+                        if self.is_capturable(index) {
+                            self.win();
+                            return;
+                        }
+                    }
+                }
+                else if self._player_captures.0 >= CAPTURE_WIN_NUMBER {
+                    self.win()
+                }
+            },
+            Playing::White => {
+                if self._player_captures.1 == CAPTURE_WIN_NUMBER - 1 {
+                    for (index, _) in self._board_states.into_iter().enumerate() {
+                        if self._board_states[index].state != self._playing.opposite() {
+                            continue;
+                        }
+                        if self.is_capturable(index) {
+                            self.win();
+                            return;
+                        }
+                    }
+                }
+                else if self._player_captures.1 >= CAPTURE_WIN_NUMBER {
+                    self.win()
+                }
+            },
+            _ => {},
+        }
+    }
+
+    fn check_possible_captures(&mut self, played_index: usize) {
+        let played: State = self._board_states[played_index].state;
+
+        fn process_capture(board: &mut Board, played_index: usize, played: State, tester: usize, diff: i16) {
+            if board._playing == State::Empty {
+                return
+            }
+            let first = (tester as i16 + (diff / 2)) as usize;
+            let second = (tester as i16 + diff) as usize;
+            // println!("{} {}", first, second);
+
+            board.log(format!("{} captured [x: {}][y: {}] and [x: {}][y: {}]", 
+                played, 
+                first % board._cols as usize,
+                (first - (first % board._cols as usize)) / board._cols as usize,
+                second % board._cols as usize,
+                (second - (second % board._cols as usize)) / board._cols as usize,
+            ));
+            board._board_states[played_index].capture(tester, first, second);
+            board._board_states[tester].capture(played_index, first, second);
+            board._board_states[first].captured.incr(played);
+            board._board_states[second].captured.incr(played);
+            if board._board_states[first].state == State::Empty {
+                board.virtual_decapturing(first);
+            }
+            if board._board_states[second].state == State::Empty {
+                board.virtual_decapturing(second);
+            }
+            if board._board_states[first].state == board._board_states[second].state && board._board_states[first].state == played.opposite() {
+                board.log(format!("{} takes stones", board._playing));
+                board.release_capture(first);
+                board.release_capture(second);
+                board._board_states[first].state = State::Empty;
+                board._board_states[second].state = State::Empty;
+                match played {
+                    State::Black => {
+                        board._player_captures.0 += 1
+                    },
+                    State::White => {
+                        board._player_captures.1 += 1
+                    },
+                    _ => {}
+                }
+                board.release_checks(first);
+                board.release_checks(second);
+            }
+        }
+
+        //left
+        (|| {
+            let mut tester = played_index as i32;
+            for _ in 0..3 {
+                tester -= 1;
+                if (tester + 1) % self._cols as i32 == 0 {
+                    return;
+                }
+            }
+
+            let tester: usize = tester as usize;
+            if self._board_states[tester].state != played {
                 return;
             }
+
+            process_capture(self, played_index, played, tester, 2);
+        })();
+
+        //right
+        (|| {
+            let mut tester = played_index as u16;
+            for _ in 0..3 {
+                tester += 1;
+                if tester % self._cols == 0 {
+                    return;
+                }
+            }
+
+            let tester: usize = tester as usize;
+            if self._board_states[tester].state != played {
+                return;
+            }
+
+            process_capture(self, played_index, played, tester, -2);
+        })();
+
+        //down
+        (|| {
+            let mut tester = played_index as u16;
+            for _ in 0..3 {
+                tester += self._cols;
+                if tester >= self._cols * self._cols {
+                    return;
+                }
+            }
+
+            let tester: usize = tester as usize;
+            if self._board_states[tester].state != played {
+                return;
+            }
+
+            process_capture(self, played_index, played, tester, self._cols as i16 * -2);
+        })();
+
+        //up
+        (|| {
+            let mut tester = played_index as i16;
+            for _ in 0..3 {
+                tester -= self._cols as i16;
+                if tester < 0 {
+                    return;
+                }
+            }
+
+            let tester: usize = tester as usize;
+            if self._board_states[tester].state != played {
+                return;
+            }
+
+            process_capture(self, played_index, played, tester, self._cols as i16 * 2);
+        })();
+
+        //diag up right
+        (|| {
+            let mut tester = played_index as i16;
+            for _ in 0..3 {
+                tester -= self._cols as i16;
+                tester += 1;
+                if tester < 0 || tester % self._cols as i16 == 0 {
+                    return;
+                }
+            }
+
+            let tester: usize = tester as usize;
+            if self._board_states[tester].state != played {
+                return;
+            }
+
+            process_capture(self, played_index, played, tester, (self._cols as i16 - 1) * 2);
+        })();
+
+        //diag up left
+        (|| {
+            let mut tester = played_index as i16;
+            for _ in 0..3 {
+                tester -= self._cols as i16;
+                tester -= 1;
+                if tester < 0 || (tester + 1) % self._cols as i16 == 0 {
+                    return;
+                }
+            }
+
+            let tester: usize = tester as usize;
+            if self._board_states[tester].state != played {
+                return;
+            }
+
+            process_capture(self, played_index, played, tester, (self._cols as i16 + 1) * 2);
+        })();
+
+        //diag down right
+        (|| {
+            let mut tester = played_index as u16;
+            for _ in 0..3 {
+                tester += self._cols;
+                tester += 1;
+                if tester >= self._cols * self._cols || tester % self._cols == 0 {
+                    return;
+                }
+            }
+
+            let tester: usize = tester as usize;
+            if self._board_states[tester].state != played {
+                return;
+            }
+
+            process_capture(self, played_index, played, tester, (self._cols as i16 + 1) * -2);
+        })();
+
+        //diag down left
+        (|| {
+            let mut tester = played_index as i16;
+            for _ in 0..3 {
+                tester += self._cols as i16;
+                tester -= 1;
+                if tester >= (self._cols * self._cols) as i16 || (tester + 1) % self._cols as i16 == 0 {
+                    return;
+                }
+            }
+
+            let tester: usize = tester as usize;
+            if self._board_states[tester].state != played {
+                return;
+            }
+
+            process_capture(self, played_index, played, tester, (self._cols as i16 - 1) * -2);
+        })();
+    }
+
+    fn release_checks(&mut self, index: usize) {
+        let cols = self._cols;
+        let area = self._area;
+        // self.log(format!("{}", index));
+
+        fn process<F1, F2>(board: &mut Board, index: usize, comp: F1, diff: F2)
+        where
+            F1: Fn(i16) -> bool, F2: Fn(i16, i32) -> usize,
+        {
+            let index = index as i16;
+
+            // right
+            for phase in 1..=3 {
+                if comp(diff(index, phase) as i16) {
+                    // board.log(format!("yea {}", diff(index, phase)));
+                    return;
+                }
+            }
+            for phase in 1..=3 {
+                let phase_index = diff(index, phase);
+                if phase == 3 {
+                    if board._board_states[phase_index as usize].state != State::Empty {
+                        // board.log("PO2".into());
+                        return;
+                    }
+                } else if board._board_states[phase_index as usize].state != board._playing {
+                    // board.log(format!("{}", board._board_states[phase_index as usize].state));
+                    return;
+                }
+            }
+            // board.log("win".into());
+            board.check_game(diff(index, 1));
+            board.check_game(diff(index, 2));
+        }
+
+        // right
+        process(self, index, |index| -> bool { index % cols as i16 == 0 }, |index, phase| -> usize { (index as i32 + phase) as usize });
+        // // left
+        process(self, index, |index| -> bool { (index + 1) % cols as i16 == 0 }, |index, phase| -> usize { (index as i32 - phase) as usize });
+        // // up
+        process(self, index, |index| -> bool { index < 0 }, |index, phase| -> usize { (index as i32 - phase * cols as i32) as usize });
+        // // down
+        process(self, index, |index| -> bool { index >= area as i16 }, |index, phase| -> usize { (index as i32 + phase * cols as i32) as usize });
+        // // up right
+        process(self, index, |index| -> bool { index < 0 || index % cols as i16 == 0 }, |index, phase| -> usize { (index as i32 - phase * cols as i32 + phase ) as usize });
+        // // up left
+        process(self, index, |index| -> bool { index < 0 || (index + 1) % cols as i16 == 0 }, |index, phase| -> usize { (index as i32 - phase * cols as i32 - phase ) as usize });
+        // // down right
+        process(self, index, |index| -> bool { index >= area as i16 || index % cols as i16 == 0 }, |index, phase| -> usize { (index as i32 + phase * cols as i32 + phase ) as usize });
+        // // down left
+        process(self, index, |index| -> bool { index >= area as i16 || (index + 1) % cols as i16 == 0 }, |index, phase| -> usize { (index as i32 + phase * cols as i32 - phase ) as usize });
+    }
+
+    fn release_capture(&mut self, origin_index: usize) {
+        let mut origin = self._board_states[origin_index];
+
+        for capture in origin.captures.iter_mut() {
+            // trouver la deuxieme cell qui capture
+            let scnd_origin_index = capture.other;
+            if scnd_origin_index == NO_CAPTURE {
+                continue;
+            }
+            // println!("RELEASE");
+            // enlever les captures des listes des deux cells
+            let to_release = self._board_states[scnd_origin_index].delete_capture(origin_index);
+            // diminuer la valeur de captured pour les deux cells capture
+            self._board_states[to_release.0].captured.decr(origin.state);
+            self._board_states[to_release.1].captured.decr(origin.state);
+        }
+        self._board_states[origin_index].clear_all_captures();
+    }
+
+    fn is_capturable(&mut self, played_index: usize) -> bool {
+        let cols = self._cols;
+        let area = self._area;
+        let mut possibles = 0;
+
+        fn process<F1, F2, F3, F4>(
+                board: &mut Board, 
+                played_index: usize, 
+                find_behind_index: F1,
+                phase_out: F2,
+                behind_out: F3,
+                diff: F4,
+            ) -> u8 
+
+            where 
+                F1: FnOnce(i16) -> i16,
+                F2: Fn(i16) -> bool,
+                F3: Fn(i16) -> bool,
+                F4: Fn(i16, i16) -> i16,
+        {
+            let played_state = board._board_states[played_index].state;
+            let mut possibles: u8 = 0;
+            let played_index: i16 = played_index as i16;
+            let behind_index = find_behind_index(played_index);
+
+            for phase in 1..3 {
+                let phase_index = diff(played_index, phase);
+                // println!("{}", phase);
+                match phase {
+                    1 => {
+                        if phase_out(phase_index) || board._board_states[phase_index as usize].state != played_state {
+                            break;
+                        }
+                    },
+                    2 => {
+                        if phase_out(phase_index) || board._board_states[phase_index as usize].state == played_state {
+                            break;
+                        }
+                        if board._board_states[phase_index as usize].state == played_state.opposite() {
+                            if behind_out(behind_index) {
+                                break;
+                            }
+                            if board._board_states[behind_index as usize].state == State::Empty && board._board_states[behind_index as usize].playable(played_state.opposite()) {
+                                board._board_states[behind_index as usize].virtual_capturing_add(played_index as usize, diff(played_index, 1) as usize);
+                                possibles += 1;
+                            }
+                        } else {
+                            if behind_out(behind_index) {
+                                break;
+                            }
+                            if board._board_states[behind_index as usize].state == played_state.opposite() && board._board_states[phase_index as usize].playable(played_state.opposite()) {
+                                board._board_states[phase_index as usize].virtual_capturing_add(played_index as usize, diff(played_index, 1) as usize);
+                                possibles += 1;
+                            }
+                        }
+                    },
+                    _ => {},
+                }
+            }
+            possibles
+        }
+
+        //left
+        possibles += process(
+            self, 
+            played_index,
+            |index| -> i16 {
+                index + 1
+            },
+            |index| -> bool {
+                (index + 1) % cols as i16 == 0
+            },
+            |index|-> bool {
+                index % cols as i16 == 0
+            },
+            |index, phase| -> i16 {
+                index - phase
+            }
+        );
+
+        //right
+        possibles += process(
+            self, 
+            played_index,
+            |index| -> i16 {
+                index - 1
+            },
+            |index| -> bool {
+                index % cols as i16 == 0
+            },
+            |index|-> bool {
+                (index + 1) % cols as i16 == 0
+            },
+            |index, phase| -> i16 {
+                index + phase
+            }
+        );
+
+        //up
+        possibles += process(
+            self, 
+            played_index,
+            |index| -> i16 {
+                index + cols as i16
+            },
+            |index| -> bool {
+                index < 0
+            },
+            |index|-> bool {
+                index >= area as i16
+            },
+            |index, phase| -> i16 {
+                index - phase * cols as i16
+            }
+        );
+
+        //down
+        possibles += process(
+            self, 
+            played_index,
+            |index| -> i16 {
+                index - cols as i16
+            },
+            |index| -> bool {
+                index >= area as i16
+            },
+            |index|-> bool {
+                index < 0
+            },
+            |index, phase| -> i16 {
+                index + phase * cols as i16
+            }
+        );
+
+        //up right
+        possibles += process(
+            self, 
+            played_index,
+            |index| -> i16 {
+                index + cols as i16 - 1
+            },
+            |index| -> bool {
+                index < 0 || index % cols as i16 == 0
+            },
+            |index|-> bool {
+                index >= area as i16 || (index + 1) % cols as i16 == 0
+            },
+            |index, phase| -> i16 {
+                index - phase * cols as i16 + phase * 1
+            }
+        );
+
+        //up left
+        possibles += process(
+            self, 
+            played_index,
+            |index| -> i16 {
+                index + cols as i16 + 1
+            },
+            |index| -> bool {
+                index < 0 || (index + 1) % cols as i16 == 0
+            },
+            |index|-> bool {
+                index >= area as i16 || index % cols as i16 == 0
+            },
+            |index, phase| -> i16 {
+                index - phase * cols as i16 - phase * 1
+            }
+        );
+
+        //down right
+        possibles += process(
+            self, 
+            played_index,
+            |index| -> i16 {
+                index - cols as i16 - 1
+            },
+            |index| -> bool {
+                index >= area as i16 || index % cols as i16 == 0
+            },
+            |index|-> bool {
+                index < 0 || (index + 1) % cols as i16 == 0
+            },
+            |index, phase| -> i16 {
+                index + phase * cols as i16 + phase * 1
+            }
+        );
+
+        //down left
+        possibles += process(
+            self, 
+            played_index,
+            |index| -> i16 {
+                index - cols as i16 + 1
+            },
+            |index| -> bool {
+                index >= area as i16 || (index + 1) % cols as i16 == 0
+            },
+            |index|-> bool {
+                index < 0 || index % cols as i16 == 0
+            },
+            |index, phase| -> i16 {
+                index + phase * cols as i16 - phase * 1
+            }
+        );
+        
+        // if possibles > 0 {
+        //     self.log(String::from("La ligne est interrompable par capture"));
+        // }
+
+        possibles > 0
+    }
+
+    fn check_lines(&mut self, played_index: usize) {
+        let played: State = self._board_states[played_index].state;
+
+        // horizontal
+        let mut hor_count: i16 = 0;
+        {
+            let mut left: i16 = played_index as i16;
+            while self._board_states[left as usize].state == played && !(self.is_capturable(left as usize)) {
+                hor_count += 1;
+                left -= 1;
+                if (left + 1) % self._cols as i16 == 0 {
+                    break
+                }
+            }
+
+            let mut right: i16 = played_index as i16;
+            while self._board_states[right as usize].state == played && !(self.is_capturable(right as usize)){
+                hor_count += 1;
+                right += 1;
+                if right % self._cols as i16 == 0 {
+                    break
+                }
+            }
+
+            if hor_count - 1 >= WIN_COND {
+                self.win();
+                return
+            }
+        }
+
+        // vertical
+        let mut ver_count: i16 = 0;
+        {
+            let mut up: i16 = played_index as i16;
+            while self._board_states[up as usize].state == played && !(self.is_capturable(up as usize)) {
+                ver_count += 1;
+                up -= self._cols as i16;
+                if up < 0 {
+                    break
+                }
+            }
+
+            let mut down: usize = played_index;
+            while self._board_states[down].state == played && !(self.is_capturable(down)) {
+                ver_count += 1;
+                down += self._cols as usize;
+                if down as u16 >= self._cols * self._cols {
+                    break
+                }
+            }
+
+            if ver_count - 1 >= WIN_COND {
+                self.win();
+                return
+            }
+        }
+
+        // up left going diags
+        let mut up_left_diag_count: i16 = 0;
+        {
+            let mut up: i16 = played_index as i16;
+            while self._board_states[up as usize].state == played && !(self.is_capturable(up as usize)) {
+                up_left_diag_count += 1;
+                let futur_move = up as i16 - self._cols as i16 - 1;
+                up = futur_move as i16;
+                if up < 0 || (up + 1) % self._cols as i16 == 0 {
+                    break
+                }
+            }
+
+            let mut down: i16 = played_index as i16;
+            while self._board_states[down as usize].state == played && !(self.is_capturable(down as usize)) {
+                up_left_diag_count += 1;
+                let futur_move = down as u16 + self._cols + 1;
+                down = futur_move as i16;
+                if down >= self._area as i16 || down % self._cols as i16 == 0 {
+                    break
+                }
+            }
+
+            if up_left_diag_count - 1 >= WIN_COND {
+                self.win();
+                return
+            }
+        }
+
+        // // up right going diags
+        let mut up_right_diag_count: i16 = 0;
+        {
+            let mut up: i16 = played_index as i16;
+            while self._board_states[up as usize].state == played && !(self.is_capturable(up as usize)) {
+                up_right_diag_count += 1;
+                let futur_move = up as i16 - self._cols as i16 + 1;
+                up = futur_move as i16;
+                if up < 0 || up % self._cols as i16 == 0 {
+                    break
+                }
+            }
+
+            let mut down: i16 = played_index as i16;
+            while self._board_states[down as usize].state == played && !(self.is_capturable(down as usize)) {
+                up_right_diag_count += 1;
+                let futur_move = down as u16 + self._cols - 1;
+                down = futur_move as i16;
+                if down >= self._area as i16 || (down + 1) % self._cols as i16 == 0 {
+                    break
+                }
+            }
+
+            if up_right_diag_count - 1 >= WIN_COND {
+                self.win();
+                return
+            }
+        }
+
+    }
+
+    pub fn init_areas(&mut self, area: Rect) {
+        let ver_constr = (0..self._rows).map(|_| Constraint::Length(self._ui_ver_size as u16));
+        let hor_constr = (0..self._cols).map(|_| Constraint::Length(self._ui_hor_size as u16));
+        let ver_layout = Layout::vertical(ver_constr);
+        let hor_layout = Layout::horizontal(hor_constr);
+
+        let ver_chunks = ver_layout.split(area);
+        let chunks = ver_chunks.iter().flat_map(|row| {
+            hor_layout.split(*row).to_vec()
+        });
+        for (i, elem) in chunks.enumerate() {
+            self._board_areas[i] = elem;
         }
     }
 
@@ -401,617 +1171,6 @@ impl Board<'_> {
         }
 
         found == 2
-    }
-
-    fn check_game(&mut self, played_index: usize) {
-        self.check_lines(played_index);
-        if self._playing == Playing::Empty {
-            return
-        }
-        self.check_possible_captures(played_index);
-        if self._playing == Playing::Empty {
-            return
-        }
-        self.check_captures_count();
-        if self._playing == Playing::Empty {
-            return
-        }
-        self.check_draw();
-        if self._playing == Playing::Empty {
-            return
-        }
-    }
-
-    fn check_draw(&mut self) {
-        for elem in self._board_states {
-            if elem.state == State::Empty && elem.playable(self._playing) {
-                return
-            }
-        }
-        self.draw();
-    }
-
-    fn check_captures_count(&mut self) {
-        match self._playing {
-            Playing::Black => {
-                if self._player_captures.0 == CAPTURE_WIN_NUMBER - 1 {
-                    for (index, _) in self._board_states.into_iter().enumerate() {
-                        if self._board_states[index].state != self._playing.opposite() {
-                            continue;
-                        }
-                        if self.is_capturable(index) {
-                            self.win();
-                            return;
-                        }
-                    }
-                }
-                else if self._player_captures.0 >= CAPTURE_WIN_NUMBER {
-                    self.win()
-                }
-            },
-            Playing::White => {
-                if self._player_captures.1 == CAPTURE_WIN_NUMBER - 1 {
-                    for (index, _) in self._board_states.into_iter().enumerate() {
-                        if self._board_states[index].state != self._playing.opposite() {
-                            continue;
-                        }
-                        if self.is_capturable(index) {
-                            self.win();
-                            return;
-                        }
-                    }
-                }
-                else if self._player_captures.1 >= CAPTURE_WIN_NUMBER {
-                    self.win()
-                }
-            },
-            _ => {},
-        }
-    }
-
-    fn check_possible_captures(&mut self, played_index: usize) {
-        let played: State = self._board_states[played_index].state;
-
-        fn process_capture(board: &mut Board, played_index: usize, played: State, tester: usize, diff: i16) {
-            let first = (tester as i16 + (diff / 2)) as usize;
-            let second = (tester as i16 + diff) as usize;
-            // println!("{} {}", first, second);
-
-            board._board_states[played_index].capture(tester, first, second);
-            board._board_states[tester].capture(played_index, first, second);
-            board._board_states[first].captured.incr(played);
-            board._board_states[second].captured.incr(played);
-            if board._board_states[first].state == board._board_states[second].state && board._board_states[first].state == played.opposite() {
-                board.log(format!("{} takes pawns", board._playing));    
-                board.release_capture(first);
-                board.release_capture(second);
-                board._board_states[first].state = State::Empty;
-                board._board_states[second].state = State::Empty;
-                match played {
-                    State::Black => {
-                        board._player_captures.0 += 1
-                    },
-                    State::White => {
-                        board._player_captures.1 += 1
-                    },
-                    _ => {}
-                }
-            }
-            board.log(format!("{} captured [x: {}][y: {}] and [x: {}][y: {}]", 
-                board._playing, 
-                first % board._cols as usize,
-                (first - (first % board._cols as usize)) / board._cols as usize,
-                second % board._cols as usize,
-                (second - (second % board._cols as usize)) / board._cols as usize,
-            ));
-        }
-
-        //left
-        (|| {
-            let mut tester = played_index as i32;
-            for _ in 0..3 {
-                tester -= 1;
-                if (tester + 1) % self._cols as i32 == 0 {
-                    return;
-                }
-            }
-
-            let tester: usize = tester as usize;
-            if self._board_states[tester].state != played {
-                return;
-            }
-
-            process_capture(self, played_index, played, tester, 2);
-        })();
-
-        //right
-        (|| {
-            let mut tester = played_index as u16;
-            for _ in 0..3 {
-                tester += 1;
-                if tester % self._cols == 0 {
-                    return;
-                }
-            }
-
-            let tester: usize = tester as usize;
-            if self._board_states[tester].state != played {
-                return;
-            }
-
-            process_capture(self, played_index, played, tester, -2);
-        })();
-
-        //down
-        (|| {
-            let mut tester = played_index as u16;
-            for _ in 0..3 {
-                tester += self._cols;
-                if tester >= self._cols * self._cols {
-                    return;
-                }
-            }
-
-            let tester: usize = tester as usize;
-            if self._board_states[tester].state != played {
-                return;
-            }
-
-            process_capture(self, played_index, played, tester, self._cols as i16 * -2);
-        })();
-
-        //up
-        (|| {
-            let mut tester = played_index as i16;
-            for _ in 0..3 {
-                tester -= self._cols as i16;
-                if tester < 0 {
-                    return;
-                }
-            }
-
-            let tester: usize = tester as usize;
-            if self._board_states[tester].state != played {
-                return;
-            }
-
-            process_capture(self, played_index, played, tester, self._cols as i16 * 2);
-        })();
-
-        //diag up right
-        (|| {
-            let mut tester = played_index as i16;
-            for _ in 0..3 {
-                tester -= self._cols as i16;
-                tester += 1;
-                if tester < 0 || tester % self._cols as i16 == 0 {
-                    return;
-                }
-            }
-
-            let tester: usize = tester as usize;
-            if self._board_states[tester].state != played {
-                return;
-            }
-
-            process_capture(self, played_index, played, tester, (self._cols as i16 - 1) * 2);
-        })();
-
-        //diag up left
-        (|| {
-            let mut tester = played_index as i16;
-            for _ in 0..3 {
-                tester -= self._cols as i16;
-                tester -= 1;
-                if tester < 0 || (tester + 1) % self._cols as i16 == 0 {
-                    return;
-                }
-            }
-
-            let tester: usize = tester as usize;
-            if self._board_states[tester].state != played {
-                return;
-            }
-
-            process_capture(self, played_index, played, tester, (self._cols as i16 + 1) * 2);
-        })();
-
-        //diag down right
-        (|| {
-            let mut tester = played_index as u16;
-            for _ in 0..3 {
-                tester += self._cols;
-                tester += 1;
-                if tester >= self._cols * self._cols || tester % self._cols == 0 {
-                    return;
-                }
-            }
-
-            let tester: usize = tester as usize;
-            if self._board_states[tester].state != played {
-                return;
-            }
-
-            process_capture(self, played_index, played, tester, (self._cols as i16 + 1) * -2);
-        })();
-
-        //diag down left
-        (|| {
-            let mut tester = played_index as i16;
-            for _ in 0..3 {
-                tester += self._cols as i16;
-                tester -= 1;
-                if tester >= (self._cols * self._cols) as i16 || (tester + 1) % self._cols as i16 == 0 {
-                    return;
-                }
-            }
-
-            let tester: usize = tester as usize;
-            if self._board_states[tester].state != played {
-                return;
-            }
-
-            process_capture(self, played_index, played, tester, (self._cols as i16 - 1) * -2);
-        })();
-    }
-
-    fn release_capture(&mut self, origin_index: usize) {
-        let mut origin = self._board_states[origin_index];
-        for capture in origin.captures.iter_mut() {
-            // trouver la deuxieme cell qui capture
-            let scnd_origin_index = capture.other;
-            if scnd_origin_index == NO_CAPTURE {
-                continue;
-            }
-            // println!("RELEASE");
-            // enlever les captures des listes des deux cells
-            let to_release = self._board_states[scnd_origin_index].delete_capture(origin_index);
-            // diminuer la valeur de captured pour les deux cells capture
-            self._board_states[to_release.0].captured.decr(origin.state);
-            self._board_states[to_release.1].captured.decr(origin.state);
-        }
-        self._board_states[origin_index].clear_all_captures()
-    }
-
-    fn is_capturable(&mut self, played_index: usize) -> bool {
-        let mut possibles = 0;
-
-        fn process<F1, F2, F3, F4>(
-                board: &Board, 
-                played_index: usize, 
-                find_behind_index: F1,
-                phase_out: F2,
-                behind_out: F3,
-                diff: F4,
-            ) -> u8 
-
-            where 
-                F1: FnOnce(i16) -> i16,
-                F2: Fn(i16) -> bool,
-                F3: Fn(i16) -> bool,
-                F4: Fn(i16, i16) -> i16,
-        {
-            let played_state = board._board_states[played_index].state;
-            let mut possibles: u8 = 0;
-            let played_index: i16 = played_index as i16;
-            let behind_index = find_behind_index(played_index);
-
-            for phase in 1..3 {
-                let phase_index = diff(played_index, phase);
-                // println!("{}", phase);
-                match phase {
-                    1 => {
-                        if phase_out(phase_index) || board._board_states[phase_index as usize].state != played_state {
-                            break;
-                        }
-                    },
-                    2 => {
-                        if phase_out(phase_index) || board._board_states[phase_index as usize].state == played_state {
-                            break;
-                        }
-                        if board._board_states[phase_index as usize].state == played_state.opposite() {
-                            if behind_out(behind_index) {
-                                break;
-                            }
-                            if board._board_states[behind_index as usize].state == State::Empty {
-                                possibles += 1;
-                            }
-                        } else {
-                            if behind_out(behind_index) {
-                                break;
-                            }
-                            if board._board_states[behind_index as usize].state == played_state.opposite() {
-                                possibles += 1;
-                            }
-                        }
-                    },
-                    _ => {},
-                }
-            }
-            possibles
-        }
-
-        //left
-        possibles += process(
-            self, 
-            played_index,
-            |index| -> i16 {
-                index + 1
-            },
-            |index| -> bool {
-                (index + 1) % self._cols as i16 == 0
-            },
-            |index|-> bool {
-                index % self._cols as i16 == 0
-            },
-            |index, phase| -> i16 {
-                index - phase
-            }
-        );
-
-        //right
-        possibles += process(
-            self, 
-            played_index,
-            |index| -> i16 {
-                index - 1
-            },
-            |index| -> bool {
-                index % self._cols as i16 == 0
-            },
-            |index|-> bool {
-                (index + 1) % self._cols as i16 == 0
-            },
-            |index, phase| -> i16 {
-                index + phase
-            }
-        );
-
-        //up
-        possibles += process(
-            self, 
-            played_index,
-            |index| -> i16 {
-                index + self._cols as i16
-            },
-            |index| -> bool {
-                index < 0
-            },
-            |index|-> bool {
-                index >= self._area as i16
-            },
-            |index, phase| -> i16 {
-                index - phase * self._cols as i16
-            }
-        );
-
-        //down
-        possibles += process(
-            self, 
-            played_index,
-            |index| -> i16 {
-                index - self._cols as i16
-            },
-            |index| -> bool {
-                index >= self._area as i16
-            },
-            |index|-> bool {
-                index < 0
-            },
-            |index, phase| -> i16 {
-                index + phase * self._cols as i16
-            }
-        );
-
-        //up right
-        possibles += process(
-            self, 
-            played_index,
-            |index| -> i16 {
-                index + self._cols as i16 - 1
-            },
-            |index| -> bool {
-                index < 0 || index % self._cols as i16 == 0
-            },
-            |index|-> bool {
-                index >= self._area as i16 || (index + 1) % self._cols as i16 == 0
-            },
-            |index, phase| -> i16 {
-                index - phase * self._cols as i16 + phase * 1
-            }
-        );
-
-        //up left
-        possibles += process(
-            self, 
-            played_index,
-            |index| -> i16 {
-                index + self._cols as i16 + 1
-            },
-            |index| -> bool {
-                index < 0 || (index + 1) % self._cols as i16 == 0
-            },
-            |index|-> bool {
-                index >= self._area as i16 || index % self._cols as i16 == 0
-            },
-            |index, phase| -> i16 {
-                index - phase * self._cols as i16 - phase * 1
-            }
-        );
-
-        //down right
-        possibles += process(
-            self, 
-            played_index,
-            |index| -> i16 {
-                index - self._cols as i16 - 1
-            },
-            |index| -> bool {
-                index >= self._area as i16 || index % self._cols as i16 == 0
-            },
-            |index|-> bool {
-                index < 0 || (index + 1) % self._cols as i16 == 0
-            },
-            |index, phase| -> i16 {
-                index + phase * self._cols as i16 + phase * 1
-            }
-        );
-
-        //down left
-        possibles += process(
-            self, 
-            played_index,
-            |index| -> i16 {
-                index - self._cols as i16 + 1
-            },
-            |index| -> bool {
-                index >= self._area as i16 || (index + 1) % self._cols as i16 == 0
-            },
-            |index|-> bool {
-                index < 0 || index % self._cols as i16 == 0
-            },
-            |index, phase| -> i16 {
-                index + phase * self._cols as i16 - phase * 1
-            }
-        );
-        
-        // if possibles > 0 {
-        //     self.log(String::from("La ligne est interrompable par capture"));
-        // }
-
-        possibles > 0
-    }
-
-    fn check_lines(&mut self, played_index: usize) {
-        let played: State = self._board_states[played_index].state;
-
-        // horizontal
-        let mut hor_count: i16 = 0;
-        {
-            let mut left: i16 = played_index as i16;
-            while self._board_states[left as usize].state == played && !(self.is_capturable(left as usize)) {
-                hor_count += 1;
-                left -= 1;
-                if (left + 1) % self._cols as i16 == 0 {
-                    break
-                }
-            }
-
-            let mut right: i16 = played_index as i16;
-            while self._board_states[right as usize].state == played && !(self.is_capturable(right as usize)){
-                hor_count += 1;
-                right += 1;
-                if right % self._cols as i16 == 0 {
-                    break
-                }
-            }
-
-            if hor_count - 1 >= WIN_COND {
-                self.win();
-                return
-            }
-        }
-
-        // vertical
-        let mut ver_count: i16 = 0;
-        {
-            let mut up: i16 = played_index as i16;
-            while self._board_states[up as usize].state == played && !(self.is_capturable(up as usize)) {
-                ver_count += 1;
-                up -= self._cols as i16;
-                if up < 0 {
-                    break
-                }
-            }
-
-            let mut down: usize = played_index;
-            while self._board_states[down].state == played && !(self.is_capturable(down)) {
-                ver_count += 1;
-                down += self._cols as usize;
-                if down as u16 >= self._cols * self._cols {
-                    break
-                }
-            }
-
-            if ver_count - 1 >= WIN_COND {
-                self.win();
-                return
-            }
-        }
-
-        // up left going diags
-        let mut up_left_diag_count: i16 = 0;
-        {
-            let mut up: i16 = played_index as i16;
-            while self._board_states[up as usize].state == played && !(self.is_capturable(up as usize)) {
-                up_left_diag_count += 1;
-                let futur_move = up as i16 - self._cols as i16 - 1;
-                up = futur_move as i16;
-                if up < 0 || (up + 1) % self._cols as i16 == 0 {
-                    break
-                }
-            }
-
-            let mut down: i16 = played_index as i16;
-            while self._board_states[down as usize].state == played && !(self.is_capturable(down as usize)) {
-                up_left_diag_count += 1;
-                let futur_move = down as u16 + self._cols + 1;
-                down = futur_move as i16;
-                if down >= self._area as i16 || down % self._cols as i16 == 0 {
-                    break
-                }
-            }
-
-            if up_left_diag_count - 1 >= WIN_COND {
-                self.win();
-                return
-            }
-        }
-
-        // // up right going diags
-        let mut up_right_diag_count: i16 = 0;
-        {
-            let mut up: i16 = played_index as i16;
-            while self._board_states[up as usize].state == played && !(self.is_capturable(up as usize)) {
-                up_right_diag_count += 1;
-                let futur_move = up as i16 - self._cols as i16 + 1;
-                up = futur_move as i16;
-                if up < 0 || up % self._cols as i16 == 0 {
-                    break
-                }
-            }
-
-            let mut down: i16 = played_index as i16;
-            while self._board_states[down as usize].state == played && !(self.is_capturable(down as usize)) {
-                up_right_diag_count += 1;
-                let futur_move = down as u16 + self._cols - 1;
-                down = futur_move as i16;
-                if down >= self._area as i16 || (down + 1) % self._cols as i16 == 0 {
-                    break
-                }
-            }
-
-            if up_right_diag_count - 1 >= WIN_COND {
-                self.win();
-                return
-            }
-        }
-
-    }
-
-    pub fn init_areas(&mut self, area: Rect) {
-        let ver_constr = (0..self._rows).map(|_| Constraint::Length(self._ui_ver_size as u16));
-        let hor_constr = (0..self._cols).map(|_| Constraint::Length(self._ui_hor_size as u16));
-        let ver_layout = Layout::vertical(ver_constr);
-        let hor_layout = Layout::horizontal(hor_constr);
-
-        let ver_chunks = ver_layout.split(area);
-        let chunks = ver_chunks.iter().flat_map(|row| {
-            hor_layout.split(*row).to_vec()
-        });
-        for (i, elem) in chunks.enumerate() {
-            self._board_areas[i] = elem;
-        }
     }
 }
 
