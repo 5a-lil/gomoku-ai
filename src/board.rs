@@ -8,44 +8,14 @@ use crossterm::event::{self, KeyCode};
 
 use chrono::{Timelike, Utc};
 
+mod ai;
+
 const BOARD_SIZE: u16 = 19;
 const HOR_SIZE: u16 = 4;
 const VER_SIZE: u16 = 2;
 const WIN_COND: i16 = 5;
 const NO_CAPTURE: usize = 9250;
 const CAPTURE_WIN_NUMBER: u8 = 5;
-
-pub struct Ai;
-
-impl Ai {
-    const MIN_START: i32 = -92;
-    const MAX_START: i32 = -92;
-
-    pub fn minimax(board: &mut Board, depth: u8, maximizing: bool) -> usize {
-        //game condition if won drow or somethin
-
-        if maximizing {
-            let mut best_score = Self::MIN_START;
-            // boucle for pour placer le pion sur chaque case et lance le minimax recurs
-                // place stone
-                let score = Self::minimax(board, depth + 1, !maximizing);
-                // rollback the move
-                best_score = std::cmp::max(score as i32, best_score);
-            //
-            best_score as usize
-        }
-        else {
-            let mut best_score = Self::MAX_START;
-            // boucle for pour placer le pion sur chaque case et lance le minimax recurs
-                // place stone
-                let score = Self::minimax(board, depth + 1, !maximizing);
-                // rollback the move
-                best_score = std::cmp::min(score as i32, best_score);
-            //
-            best_score as usize
-        }
-    }
-}
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct Capture {
@@ -214,6 +184,7 @@ pub struct Board<'a> {
     pub _log_lines: Vec<Line<'a>>,
     pub _computation_time: i64,
     pub _ai: bool,
+    pub _last_played_index: usize,
 } 
 
 impl Board<'_> {
@@ -232,6 +203,7 @@ impl Board<'_> {
             _log_lines: Vec::new(),
             _computation_time: 0,
             _ai: false,
+            _last_played_index: 0,
         }
     }
 
@@ -299,16 +271,20 @@ impl Board<'_> {
                 self.log(format!("{} at [x: {}, y: {}]", self._playing, i % self._cols as usize, (i - (i % self._cols as usize)) / self._cols as usize));
                 self._board_states[i].state = self._playing; //placing the stone
                 self.virtual_decapturing(i);
-                self._computation_time = Utc::now().timestamp_millis();
+                self._computation_time = Utc::now().timestamp_micros();
                 self.check_game(i);
-                self._computation_time = Utc::now().timestamp_millis() - self._computation_time;
+                self._computation_time = Utc::now().timestamp_micros() - self._computation_time;
                 self._playing = self._playing.opposite();
+                self._last_played_index = i;
                 break;
             }
         }
 
         if self._ai {
-            todo!("ai play")
+            let mut ai: ai::Ai = ai::Ai::new(self);
+            ai.play(self._last_played_index);
+            self.log("Ai played temp log later good message".into());
+            self._playing = self._playing.opposite();
         }
     }
 
