@@ -1,6 +1,6 @@
 
 all:
-	cargo run
+	cargo test && cargo run
 
 clean:
 

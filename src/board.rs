@@ -42,8 +42,8 @@ impl Capture {
 
 #[derive(Debug, Copy, Clone, PartialEq, Default)]
 pub struct Captured {
-    whites: u8,
-    blacks: u8,
+    whites: u32,
+    blacks: u32,
 }
 
 impl Captured {
@@ -60,6 +60,7 @@ impl Captured {
     }
 
     pub fn incr(&mut self, state: State) {
+        // println!("what");
         match state {
             State::Black => {
                 self.blacks += 1
@@ -116,7 +117,7 @@ impl Cell {
     }
 
     pub fn capture(&mut self, other: usize, first: usize, second: usize) {
-        *(self.captures.iter_mut().find(|elem| elem.other == NO_CAPTURE).unwrap()) = Capture::new(other, first, second);
+        *(self.captures.iter_mut().find(|elem| elem.other == NO_CAPTURE || elem.other == other).unwrap()) = Capture::new(other, first, second);
     }
 
     pub fn virtual_capturing_add(&mut self, index1: usize, index2: usize) {
@@ -183,6 +184,7 @@ pub struct Board<'a> {
     _player_captures: (u8, u8),
     pub _log_lines: Vec<Line<'a>>,
     pub _computation_time: i64,
+    pub _ai_computation_time: i64,
     pub _ai: bool,
     pub _last_played_index: usize,
 } 
@@ -202,6 +204,7 @@ impl Board<'_> {
             _player_captures: (0, 0),
             _log_lines: Vec::new(),
             _computation_time: 0,
+            _ai_computation_time: 0,
             _ai: false,
             _last_played_index: 0,
         }
@@ -243,6 +246,15 @@ impl Board<'_> {
         ]))
     }
 
+    fn place_stone(&mut self, i: usize) {
+        self.log(format!("{} at [x: {}, y: {}]", self._playing, i % self._cols as usize, (i - (i % self._cols as usize)) / self._cols as usize));
+        self._board_states[i].state = self._playing; //placing the stone
+        self.virtual_decapturing(i);
+        self.check_game(i);
+        self._playing = self._playing.opposite();
+        self._last_played_index = i;
+    }
+
     pub fn handle_mouse_move(&mut self, col: u16, row: u16) {
         // Temporarily blocking play when there is a win or draw
         // if self._playing == State::Empty {
@@ -268,23 +280,21 @@ impl Board<'_> {
                     return;
                 }
 
-                self.log(format!("{} at [x: {}, y: {}]", self._playing, i % self._cols as usize, (i - (i % self._cols as usize)) / self._cols as usize));
-                self._board_states[i].state = self._playing; //placing the stone
-                self.virtual_decapturing(i);
                 self._computation_time = Utc::now().timestamp_micros();
-                self.check_game(i);
+                self.place_stone(i);
                 self._computation_time = Utc::now().timestamp_micros() - self._computation_time;
-                self._playing = self._playing.opposite();
-                self._last_played_index = i;
+
+                if self._ai && self._playing != State::Empty {
+                    let mut ai: ai::Ai = ai::Ai::new(self);
+                    self._ai_computation_time = Utc::now().timestamp_millis();
+                    self.log(format!("{}", ai.play(self._last_played_index)));
+                    self._ai_computation_time = Utc::now().timestamp_millis() - self._ai_computation_time;
+                    let i = ai.best_index;
+                    self.place_stone(i);
+                    self.log(format!("num_iters: {}", ai.num_iters));
+                }
                 break;
             }
-        }
-
-        if self._ai {
-            let mut ai: ai::Ai = ai::Ai::new(self);
-            ai.play(self._last_played_index);
-            self.log("Ai played temp log later good message".into());
-            self._playing = self._playing.opposite();
         }
     }
 
@@ -292,8 +302,8 @@ impl Board<'_> {
 
         for (i, elem) in self._board_states[index].virtual_capturer.into_iter().enumerate() {
             if let Some((index1, index2)) = elem {
-                self.check_game(index1);
-                self.check_game(index2);
+                self.check_lines(index1);
+                self.check_lines(index2);
             }
             self._board_states[index].virtual_capturer[i] = None
         }
@@ -374,7 +384,6 @@ impl Board<'_> {
             }
             let first = (tester as i16 + (diff / 2)) as usize;
             let second = (tester as i16 + diff) as usize;
-            // println!("{} {}", first, second);
 
             board.log(format!("{} captured [x: {}][y: {}] and [x: {}][y: {}]", 
                 played, 
@@ -383,10 +392,6 @@ impl Board<'_> {
                 second % board._cols as usize,
                 (second - (second % board._cols as usize)) / board._cols as usize,
             ));
-            board._board_states[played_index].capture(tester, first, second);
-            board._board_states[tester].capture(played_index, first, second);
-            board._board_states[first].captured.incr(played);
-            board._board_states[second].captured.incr(played);
             if board._board_states[first].state == State::Empty {
                 board.virtual_decapturing(first);
             }
@@ -411,6 +416,10 @@ impl Board<'_> {
                 board.release_checks(first);
                 board.release_checks(second);
             }
+            board._board_states[played_index].capture(tester, first, second);
+            board._board_states[tester].capture(played_index, first, second);
+            board._board_states[first].captured.incr(played);
+            board._board_states[second].captured.incr(played);
         }
 
         //left
@@ -593,8 +602,8 @@ impl Board<'_> {
                 }
             }
             // board.log("win".into());
-            board.check_game(diff(index, 1));
-            board.check_game(diff(index, 2));
+            board.check_lines(diff(index, 1));
+            board.check_lines(diff(index, 2));
         }
 
         // right
@@ -849,6 +858,9 @@ impl Board<'_> {
 
     fn check_lines(&mut self, played_index: usize) {
         let played: State = self._board_states[played_index].state;
+        if self._playing == State::Empty || self._board_states[played_index].state == State::Empty {
+            return
+        }
 
         // horizontal
         let mut hor_count: i16 = 0;

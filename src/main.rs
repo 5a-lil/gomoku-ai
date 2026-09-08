@@ -143,8 +143,9 @@ impl App<'_> {
 
         // render le block de droite
         let right_sub_chunks = Layout::vertical([
-            Constraint::Percentage(50),
-            Constraint::Percentage(50),
+            Constraint::Percentage(40),
+            Constraint::Percentage(30),
+            Constraint::Percentage(30),
         ]).split(self._chunks[2]);
         let right_block = Block::bordered().padding(Padding::left(1)).border_type(BorderType::Rounded);
 
@@ -152,7 +153,12 @@ impl App<'_> {
             Line::from(">- General Metrics -<").white().bold(),
             Line::from(""),
             Line::from(format!("Computation time: {} ms", self._board._computation_time)),
-        ]).alignment(Alignment::Center).block(right_block), right_sub_chunks[1].centered(Constraint::Percentage(50), Constraint::Length(5)));
+        ]).alignment(Alignment::Center).block(right_block.clone()), right_sub_chunks[1].centered(Constraint::Percentage(50), Constraint::Length(5)));
+        frame.render_widget(Paragraph::new(vec![
+            Line::from(">- AI Metrics -<").white().bold(),
+            Line::from(""),
+            Line::from(format!("Computation time: {} ms", self._board._ai_computation_time)),
+        ]).alignment(Alignment::Center).block(right_block), right_sub_chunks[2].centered(Constraint::Percentage(50), Constraint::Length(5)));
         frame.render_widget(Paragraph::new(vec![
             Line::from(" ▄▄▄▄▄▄▄                                    ").alignment(Alignment::Center),
             Line::from("███▀▀▀▀▀                       ▄▄           ").alignment(Alignment::Center),
