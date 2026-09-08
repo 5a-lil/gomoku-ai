@@ -1,0 +1,166 @@
+//! Évaluation heuristique d'une position : la fonction dont dépend toute la
+//! qualité de jeu de l'IA (voir `DEFENSE.md` pour la discussion complète).
+//!
+//! Toujours exprimée du point de vue **du joueur au trait** (convention
+//! "negamax") : une valeur positive signifie que la position favorise le
+//! joueur qui doit jouer. La quasi-totalité du score vient de
+//! `Position::score`, maintenu incrémentalement par `game::position` (voir
+//! `game::patterns::line_contribution`) : cette fonction se contente d'y
+//! ajouter deux termes qui ne se prêtent pas à un maintien incrémental
+//! simple (progression des captures, vulnérabilité du dernier coup).
+
+use crate::game::position::{opponent, Position, BLACK, DIRS8, EMPTY, WHITE};
+
+/// Score conventionnel pour "victoire certaine". Les scores de mat réels
+/// sont `WIN - ply` (voir `ai::search`) afin de préférer les victoires
+/// rapides ; `INF` sert de borne pour les fenêtres alpha-bêta initiales,
+/// toujours strictement au-delà de tout score de mat possible.
+pub const INF: i32 = 1_000_000_000;
+pub const WIN: i32 = 900_000_000;
+
+/// Score additionnel par nombre de paires déjà capturées (0 à 4 ; 5 est une
+/// victoire immédiate traitée par `game::rules`, jamais atteinte ici).
+/// Progression volontairement non linéaire : chaque paire supplémentaire
+/// rapproche dangereusement de la victoire à 5 paires (section 3.3 du
+/// sujet), donc son poids doit croître plus vite qu'un simple compteur
+/// linéaire pour que l'IA priorise réellement la 4e paire.
+const CAPTURE_SCORE: [i32; 5] = [0, 1_500, 4_000, 9_000, 25_000];
+
+/// Pénalité par paire du joueur qui vient de jouer, immédiatement capturable
+/// par l'adversaire (motif "vide-joueur-joueur-adversaire" sur un axe).
+/// Limité au dernier coup joué (voir le commentaire de `vulnerability_term`)
+/// : c'est une simplification assumée, documentée dans `DEFENSE.md`.
+const VULNERABILITY_PENALTY: i32 = 800;
+
+fn capture_term(pos: &Position, player: u8) -> i32 {
+    let n = (pos.pairs_captured[player as usize] as usize).min(CAPTURE_SCORE.len() - 1);
+    CAPTURE_SCORE[n]
+}
+
+/// Pénalise, pour `player`, le fait que son dernier coup ait créé une paire
+/// immédiatement capturable par l'adversaire.
+///
+/// Limitation assumée : seule la paire impliquant la pierre du DERNIER coup
+/// est vérifiée, pas l'intégralité du plateau (un balayage complet coûterait
+/// à nouveau O(361) par feuille, ce qui annulerait le gain de l'évaluation
+/// incrémentale). En pratique, c'est le cas le plus fréquent et le plus
+/// exploitable tactiquement : une vulnérabilité plus ancienne, non corrigée,
+/// réapparaît de toute façon dans l'évaluation dès qu'un coup la retouche.
+fn vulnerability_term(pos: &Position, player: u8) -> i32 {
+    let Some(last) = pos.last_move else {
+        return 0;
+    };
+    if pos.cells[last] != player {
+        return 0;
+    }
+    let opp = opponent(player);
+    let idx = last as i32;
+    let mut count = 0;
+    for &d in DIRS8.iter() {
+        if pos.cell_at(idx + d) == player
+            && pos.cell_at(idx - d) == EMPTY
+            && pos.cell_at(idx + 2 * d) == opp
+        {
+            count += 1;
+        }
+    }
+    count * VULNERABILITY_PENALTY
+}
+
+/// Évalue `pos` du point de vue du joueur au trait. Ne présuppose pas que
+/// `pos` est terminale : c'est `ai::search` qui vérifie l'alignement de 5+,
+/// la victoire par capture et le match nul *avant* d'appeler `evaluate`,
+/// pour attribuer les scores de victoire exacts (`WIN - ply`) plutôt qu'une
+/// simple grande valeur heuristique.
+pub fn evaluate(pos: &Position) -> i32 {
+    let black_relative = pos.score + capture_term(pos, BLACK) - capture_term(pos, WHITE)
+        - vulnerability_term(pos, BLACK)
+        + vulnerability_term(pos, WHITE);
+
+    if pos.to_move == BLACK {
+        black_relative
+    } else {
+        -black_relative
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::position::xy_to_index;
+
+    #[test]
+    fn position_vide_est_neutre() {
+        let pos = Position::new();
+        assert_eq!(evaluate(&pos), 0);
+    }
+
+    #[test]
+    fn avoir_un_trois_libre_de_plus_favorise_le_joueur_au_trait() {
+        let mut pos = Position::new();
+        pos.set_stone_for_test(xy_to_index(9, 9), BLACK);
+        pos.set_stone_for_test(xy_to_index(10, 9), BLACK);
+        pos.set_stone_for_test(xy_to_index(11, 9), BLACK);
+        pos.to_move = BLACK;
+        assert!(evaluate(&pos) > 0, "Noir doit être favorisé et c'est à lui de jouer");
+        pos.to_move = WHITE;
+        assert!(evaluate(&pos) < 0, "du point de vue de Blanc, la même position est défavorable");
+    }
+
+    #[test]
+    fn quatre_libre_vaut_beaucoup_plus_qu_un_trois_libre() {
+        let mut trois = Position::new();
+        trois.set_stone_for_test(xy_to_index(9, 9), BLACK);
+        trois.set_stone_for_test(xy_to_index(10, 9), BLACK);
+        trois.set_stone_for_test(xy_to_index(11, 9), BLACK);
+        trois.to_move = BLACK;
+
+        let mut quatre = Position::new();
+        quatre.set_stone_for_test(xy_to_index(9, 9), BLACK);
+        quatre.set_stone_for_test(xy_to_index(10, 9), BLACK);
+        quatre.set_stone_for_test(xy_to_index(11, 9), BLACK);
+        quatre.set_stone_for_test(xy_to_index(12, 9), BLACK);
+        quatre.to_move = BLACK;
+
+        assert!(evaluate(&quatre) > evaluate(&trois) * 5);
+    }
+
+    #[test]
+    fn capture_term_est_croissant_et_convexe() {
+        let mut pos = Position::new();
+        let mut previous_gain = 0;
+        let mut previous_score = evaluate(&pos);
+        for n in 1..=4u8 {
+            pos.pairs_captured[BLACK as usize] = n;
+            let score = evaluate(&pos);
+            let gain = score - previous_score;
+            assert!(gain > previous_gain, "le gain marginal doit croître avec le nombre de paires");
+            previous_gain = gain;
+            previous_score = score;
+        }
+    }
+
+    #[test]
+    fn coup_qui_expose_une_paire_est_penalise() {
+        // Noir vient de jouer en (5,5), formant une paire (4,5)-(5,5) avec
+        // (3,5) déjà blanc d'un côté : si (6,5) est vide, Blanc peut capturer
+        // en y jouant. La position doit être moins bonne pour Noir que la
+        // même position sans cette vulnérabilité (Blanc absent en (3,5)).
+        let mut vulnerable = Position::new();
+        vulnerable.set_stone_for_test(xy_to_index(3, 5), WHITE);
+        vulnerable.set_stone_for_test(xy_to_index(4, 5), BLACK);
+        vulnerable.to_move = BLACK;
+        vulnerable.make_move(xy_to_index(5, 5));
+
+        let mut safe = Position::new();
+        safe.set_stone_for_test(xy_to_index(4, 5), BLACK);
+        safe.to_move = BLACK;
+        safe.make_move(xy_to_index(5, 5));
+
+        // Les deux positions sont évaluées du point de vue de Blanc (au
+        // trait après le coup de Noir) : la version vulnérable doit être
+        // relativement meilleure pour Blanc (donc un score plus grand, côté
+        // Blanc) que la version sûre.
+        assert!(evaluate(&vulnerable) > evaluate(&safe));
+    }
+}
