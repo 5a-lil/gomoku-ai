@@ -16,4 +16,4 @@ pub mod position;
 pub mod rules;
 pub mod state;
 
-pub use state::{Game, GameMode, MoveReport, Outcome};
+pub use state::{Game, GameMode, Outcome};

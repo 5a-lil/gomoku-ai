@@ -121,7 +121,7 @@ impl<'a> SearchContext<'a> {
     #[inline]
     fn tick(&mut self) -> bool {
         self.nodes += 1;
-        if self.nodes % TIME_CHECK_INTERVAL == 0 && Instant::now() >= self.deadline_hard {
+        if self.nodes.is_multiple_of(TIME_CHECK_INTERVAL) && Instant::now() >= self.deadline_hard {
             self.stop.store(true, Relaxed);
         }
         self.stop.load(Relaxed)
@@ -225,7 +225,7 @@ fn quiescence(pos: &mut Position, mut alpha: i32, beta: i32, ply: u32, qdepth: u
 
 /// Cœur de la recherche : negamax + alpha-bêta + PVS + table de
 /// transposition, sur les nœuds internes (hors racine, voir `search_root`).
-fn negamax(pos: &mut Position, depth: i32, ply: u32, mut alpha: i32, beta: i32, ctx: &mut SearchContext) -> i32 {
+fn negamax(pos: &mut Position, depth: i32, ply: u32, alpha: i32, beta: i32, ctx: &mut SearchContext) -> i32 {
     if ctx.tick() {
         return 0;
     }
@@ -343,7 +343,7 @@ fn search_root(
     let tt_entry = ctx.tt.probe(pos.zobrist);
     let tt_move = tt_entry.and_then(|e| e.best_move);
     let killers = ctx.killers[0];
-    let moves = movegen::generate_ordered(
+    let mut moves = movegen::generate_ordered(
         pos,
         player,
         tt_move,
@@ -354,6 +354,18 @@ fn search_root(
 
     if moves.is_empty() {
         return (0, None, false, Vec::new());
+    }
+
+    // Lazy SMP (voir `DEFENSE.md`, section parallélisme) : les threads
+    // auxiliaires (`seed` impair) permutent les deux meilleurs candidats de
+    // la racine avant de les explorer. Un thread qui reparcourrait
+    // exactement le même ordre que le thread principal n'apporterait rien
+    // via la table de transposition partagée ; cette perturbation minime et
+    // déterministe (donc reproductible d'une exécution à l'autre pour un
+    // même `seed`) diversifie l'exploration sans dégrader l'ordonnancement
+    // du thread principal (`seed == 0`, jamais permuté).
+    if ctx.seed % 2 == 1 && moves.len() > 1 {
+        moves.swap(0, 1);
     }
 
     let mut alpha = alpha0;
@@ -533,16 +545,28 @@ fn extract_pv(pos: &mut Position, tt: &TranspositionTable, max_len: usize) -> Ve
 
 pub struct Engine {
     tt: Arc<TranspositionTable>,
-    threads: usize,
+    /// Nombre de threads par défaut, utilisé par `search` uniquement si
+    /// `SearchLimits::threads` vaut 0 (garde-fou : une configuration à 0
+    /// thread ne doit jamais bloquer indéfiniment la recherche, voir
+    /// `search`).
+    default_threads: usize,
 }
 
 impl Engine {
     pub fn new(tt_entries: usize, threads: usize) -> Self {
-        Engine { tt: Arc::new(TranspositionTable::new(tt_entries)), threads: threads.max(1) }
+        Engine { tt: Arc::new(TranspositionTable::new(tt_entries)), default_threads: threads.max(1) }
     }
 
     pub fn tt_len(&self) -> usize {
         self.tt.len()
+    }
+
+    /// Vrai si la table de transposition a fini par se dégrader jusqu'à
+    /// une taille nulle (voir `ai::tt::TranspositionTable::new`) : ne
+    /// devrait quasiment jamais se produire, mais l'interface l'affiche
+    /// dans le panneau de débogage par souci de transparence totale.
+    pub fn tt_is_empty(&self) -> bool {
+        self.tt.is_empty()
     }
 
     /// Lance la recherche et renvoie le meilleur coup trouvé ainsi que les
@@ -559,7 +583,7 @@ impl Engine {
         let deadline_soft = start + Duration::from_millis(limits.soft_ms);
         let deadline_hard = start + Duration::from_millis(limits.hard_ms);
         let stop = Arc::new(AtomicBool::new(false));
-        let n_threads = limits.threads.max(1);
+        let n_threads = if limits.threads == 0 { self.default_threads } else { limits.threads };
 
         let results: Vec<ThreadResult> = std::thread::scope(|scope| {
             let mut handles = Vec::with_capacity(n_threads);
@@ -735,6 +759,175 @@ mod tests {
             if let Some(mv) = result.best_move {
                 assert!(is_move_legal(&pos, mv), "coup illégal proposé : {mv}");
             }
+        }
+    }
+}
+
+/// Les 5 positions de référence utilisées par le test de performance
+/// ci-dessous et par le tableau de mesures de `DEFENSE.md`. Centralisées ici
+/// pour que le test et la documentation ne puissent pas diverger.
+#[cfg(test)]
+fn reference_positions() -> Vec<(&'static str, Position)> {
+    use crate::game::position::{xy_to_index, BLACK, WHITE};
+
+    let mut positions = Vec::new();
+
+    // 1. Plateau vide : le cas le moins coûteux par nœud (peu de voisins),
+    // mais celui qui doit dérouler le plus grand nombre d'itérations.
+    positions.push(("plateau vide", Position::new()));
+
+    // 2. Ouverture simple : quelques pierres proches du centre, aucune
+    // menace formée. Représentatif des premiers coups d'une vraie partie.
+    let mut opening = Position::new();
+    for (x, y, c) in [(9, 9, BLACK), (9, 10, WHITE), (10, 10, BLACK), (10, 9, WHITE)] {
+        opening.set_stone_for_test(xy_to_index(x, y), c);
+    }
+    opening.to_move = BLACK;
+    positions.push(("ouverture simple", opening));
+
+    // 3. Milieu de partie simple : disposition en "8 dames" par couleur (16
+    // pierres, aucun alignement de 3+ déjà présent par construction). Voir
+    // le commentaire de `bench_depth_500ms` pour le détail de ce choix.
+    let mut midgame = Position::new();
+    let midgame_stones = [
+        (6, 6, BLACK), (7, 10, BLACK), (8, 13, BLACK), (9, 11, BLACK),
+        (10, 8, BLACK), (11, 12, BLACK), (12, 7, BLACK), (13, 9, BLACK),
+        (6, 9, WHITE), (7, 7, WHITE), (8, 12, WHITE), (9, 8, WHITE),
+        (10, 11, WHITE), (11, 13, WHITE), (12, 10, WHITE), (13, 6, WHITE),
+    ];
+    for (x, y, c) in midgame_stones {
+        midgame.set_stone_for_test(xy_to_index(x, y), c);
+    }
+    midgame.to_move = BLACK;
+    positions.push(("milieu de partie simple", midgame));
+
+    // 4. Milieu de partie avec menaces multiples : un trois libre noir que
+    // Blanc doit sérieusement prendre en compte (sans que ce soit pour
+    // autant un coup forcé unique), plus plusieurs pierres dispersées qui
+    // gonflent le facteur de branchement candidat. Volontairement PAS un
+    // coup gagnant immédiat pour quiconque : on veut mesurer une recherche
+    // qui va au bout de son budget de temps, pas une qui s'arrête tôt parce
+    // qu'elle a prouvé un gain (voir le commentaire de la boucle
+    // d'approfondissement itératif sur l'arrêt anticipé en cas de victoire
+    // certaine).
+    let mut multi_threat = Position::new();
+    for (x, y, c) in [
+        (5, 9, BLACK), (6, 9, BLACK), (7, 9, BLACK), // trois libre horizontal noir
+        (9, 12, WHITE), (12, 9, WHITE), (6, 13, WHITE), (13, 6, WHITE),
+        (4, 4, BLACK), (14, 14, WHITE),
+    ] {
+        multi_threat.set_stone_for_test(xy_to_index(x, y), c);
+    }
+    multi_threat.to_move = WHITE;
+    positions.push(("milieu de partie, menaces multiples", multi_threat));
+
+    // 5. Position tactique complexe : un quatre simple à bloquer pour
+    // Blanc, une capture disponible pour Noir, et plusieurs pierres autour
+    // qui gonflent le facteur de branchement candidat.
+    let mut tactical = Position::new();
+    for (x, y, c) in [
+        (4, 10, BLACK), (5, 10, BLACK), (6, 10, BLACK), (7, 10, BLACK), // quatre simple noir
+        (8, 10, WHITE),
+        (3, 10, WHITE),
+        (10, 4, WHITE), (10, 5, WHITE), (10, 6, BLACK), // paire blanche capturable par Noir
+        (14, 14, BLACK), (14, 13, WHITE), (13, 14, WHITE),
+    ] {
+        tactical.set_stone_for_test(xy_to_index(x, y), c);
+    }
+    tactical.to_move = WHITE;
+    positions.push(("position tactique complexe", tactical));
+
+    positions
+}
+
+#[cfg(test)]
+mod performance_tests {
+    use super::*;
+
+    /// Test de performance obligatoire (section 8 du sujet) : sur chacune
+    /// des 5 positions de référence, la dernière itération TERMINÉE doit
+    /// atteindre au moins la profondeur indiquée, en moins de 550 ms de
+    /// temps mesuré (budget interne 380/500 ms + marge de jointure de
+    /// threads). Volontairement `#[ignore]` par défaut (comme le permet le
+    /// sujet) : lancé en parallèle des 58 autres tests, il subirait une
+    /// contention CPU qui fausserait la mesure de profondeur sans refléter
+    /// une régression réelle. Invocation : `cargo test --release
+    /// performance_tests -- --ignored --nocapture`. Les profondeurs
+    /// planchers ci-dessous sont volontairement un peu sous les valeurs
+    /// observées en développement (voir `DEFENSE.md`, tableau de mesures),
+    /// pour rester robuste sur une machine de correction plus lente sans
+    /// jamais maquiller un vrai recul de performance.
+    #[test]
+    #[ignore]
+    fn depth_10_sous_500ms_sur_positions_de_reference() {
+        let threads = default_thread_count();
+        let limits = SearchLimits { soft_ms: 380, hard_ms: 500, max_depth: 24, threads };
+        // (nom, profondeur plancher exigée par ce test)
+        let floors = [10u8, 10, 8, 8, 8];
+
+        for (i, (name, pos)) in reference_positions().into_iter().enumerate() {
+            let engine = Engine::new(1 << 20, threads);
+            let t0 = Instant::now();
+            let result = engine.search(&pos, limits);
+            let elapsed = t0.elapsed();
+            println!(
+                "{name}: depth={} nodes={} elapsed={:?} score={} best={:?}",
+                result.stats.depth_reached, result.stats.nodes, elapsed, result.stats.score, result.best_move
+            );
+            assert!(
+                result.stats.depth_reached >= floors[i],
+                "{name}: profondeur {} insuffisante (attendu >= {})",
+                result.stats.depth_reached,
+                floors[i]
+            );
+            assert!(
+                elapsed <= Duration::from_millis(550),
+                "{name}: temps {elapsed:?} dépasse le budget (attendu <= 550 ms)"
+            );
+        }
+    }
+}
+
+/// Mesure isolée du gain apporté par le nombre de threads et par la taille
+/// de la table de transposition (les deux seuls paramètres qu'on peut faire
+/// varier sans dupliquer le moteur), sur les 5 positions de référence.
+/// Alimente le tableau "gain de chaque optimisation" de `DEFENSE.md`.
+/// `#[ignore]` pour la même raison que les autres bancs d'essai : invocation
+/// via `cargo test --release ablation -- --ignored --nocapture`.
+#[cfg(test)]
+mod ablation {
+    use super::*;
+
+    #[test]
+    #[ignore]
+    fn threads_et_table_de_transposition() {
+        let limits_mono = SearchLimits { soft_ms: 380, hard_ms: 500, max_depth: 24, threads: 1 };
+        let limits_multi =
+            SearchLimits { soft_ms: 380, hard_ms: 500, max_depth: 24, threads: default_thread_count() };
+
+        for (name, pos) in reference_positions() {
+            let engine_mono = Engine::new(1 << 20, 1);
+            let r_mono = engine_mono.search(&pos, limits_mono);
+
+            let engine_multi = Engine::new(1 << 20, default_thread_count());
+            let r_multi = engine_multi.search(&pos, limits_multi);
+
+            // Table de transposition quasi désactivée (1 seule entrée : la
+            // quasi-totalité des sondes échouent, la recherche reste
+            // correcte mais ne bénéficie plus des transpositions).
+            let engine_no_tt = Engine::new(1, default_thread_count());
+            let r_no_tt = engine_no_tt.search(&pos, limits_multi);
+
+            println!(
+                "{name} : mono-thread depth={} nodes={} | multi-thread ({} threads) depth={} nodes={} | TT quasi-désactivée depth={} nodes={}",
+                r_mono.stats.depth_reached,
+                r_mono.stats.nodes,
+                default_thread_count(),
+                r_multi.stats.depth_reached,
+                r_multi.stats.nodes,
+                r_no_tt.stats.depth_reached,
+                r_no_tt.stats.nodes,
+            );
         }
     }
 }

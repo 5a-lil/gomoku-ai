@@ -89,7 +89,7 @@ impl TranspositionTable {
     /// suivi d'un `unwrap`.
     pub fn new(target_entries: usize) -> Self {
         let target_entries = target_entries.min(Self::MAX_ENTRIES);
-        let mut size = target_entries.next_power_of_two().max(1).min(Self::MAX_ENTRIES);
+        let mut size = target_entries.next_power_of_two().clamp(1, Self::MAX_ENTRIES);
         loop {
             match Self::try_allocate(size) {
                 Some(slots) => {

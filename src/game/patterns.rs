@@ -230,8 +230,8 @@ pub fn virtual_best_run_score(pos: &Position, index: usize, player: u8) -> i32 {
 /// fois, gauche et droite étant la même ligne.
 pub fn free_three_axes(pos: &Position, index: usize, player: u8) -> [bool; 4] {
     let mut result = [false; 4];
-    for axis in 0..AXES.len() {
-        result[axis] = creates_free_three_on_axis(pos, index, axis, player);
+    for (axis, slot) in result.iter_mut().enumerate() {
+        *slot = creates_free_three_on_axis(pos, index, axis, player);
     }
     result
 }

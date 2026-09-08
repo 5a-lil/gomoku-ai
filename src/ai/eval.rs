@@ -84,6 +84,45 @@ pub fn evaluate(pos: &Position) -> i32 {
     }
 }
 
+/// Décomposition de l'évaluation par catégorie, du point de vue de Noir
+/// (positif favorise Noir), destinée exclusivement au panneau de débogage de
+/// l'interface (touche « détail du score ») : ce n'est jamais consulté par
+/// la recherche elle-même, qui n'utilise que [`evaluate`].
+#[derive(Debug, Clone, Copy)]
+pub struct Breakdown {
+    /// `Position::score` : somme des fenêtres de motifs, point de vue Noir.
+    pub positional_black: i32,
+    pub capture_black: i32,
+    pub capture_white: i32,
+    pub vulnerability_black: i32,
+    pub vulnerability_white: i32,
+    /// Total du point de vue de Noir (positif favorise Noir).
+    pub total_black: i32,
+    /// Même total, mais du point de vue du joueur actuellement au trait
+    /// (c'est cette valeur que la recherche utilise réellement).
+    pub total_mover: i32,
+}
+
+pub fn breakdown(pos: &Position) -> Breakdown {
+    let positional_black = pos.score;
+    let capture_black = capture_term(pos, BLACK);
+    let capture_white = capture_term(pos, WHITE);
+    let vulnerability_black = vulnerability_term(pos, BLACK);
+    let vulnerability_white = vulnerability_term(pos, WHITE);
+    let total_black =
+        positional_black + capture_black - capture_white - vulnerability_black + vulnerability_white;
+    let total_mover = if pos.to_move == BLACK { total_black } else { -total_black };
+    Breakdown {
+        positional_black,
+        capture_black,
+        capture_white,
+        vulnerability_black,
+        vulnerability_white,
+        total_black,
+        total_mover,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,5 +201,46 @@ mod tests {
         // relativement meilleure pour Blanc (donc un score plus grand, côté
         // Blanc) que la version sûre.
         assert!(evaluate(&vulnerable) > evaluate(&safe));
+    }
+}
+
+#[cfg(test)]
+mod bench {
+    use super::*;
+    use crate::game::position::xy_to_index;
+    use std::time::Instant;
+
+    /// Mesure le coût réel d'un appel à `evaluate` sur une position de
+    /// milieu de partie typique, pour le comparer au chiffre mesuré sur
+    /// l'ancienne implémentation (1,3 µs, voir `DEFENSE.md`, section
+    /// "évaluation incrémentale"). `#[ignore]` par défaut : c'est une
+    /// mesure de performance, pas une assertion de correction ; invocation
+    /// : `cargo test --release ai::eval::bench -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn cout_de_evaluate() {
+        let mut pos = Position::new();
+        let stones: [(usize, usize, u8); 16] = [
+            (6, 6, BLACK), (7, 10, BLACK), (8, 13, BLACK), (9, 11, BLACK),
+            (10, 8, BLACK), (11, 12, BLACK), (12, 7, BLACK), (13, 9, BLACK),
+            (6, 9, WHITE), (7, 7, WHITE), (8, 12, WHITE), (9, 8, WHITE),
+            (10, 11, WHITE), (11, 13, WHITE), (12, 10, WHITE), (13, 6, WHITE),
+        ];
+        for (x, y, c) in stones {
+            pos.set_stone_for_test(xy_to_index(x, y), c);
+        }
+
+        const N: u32 = 5_000_000;
+        let t0 = Instant::now();
+        let mut acc: i64 = 0;
+        for _ in 0..N {
+            acc += evaluate(&pos) as i64;
+        }
+        let elapsed = t0.elapsed();
+        let per_call = elapsed / N;
+        println!(
+            "evaluate(): {N} appels en {elapsed:?}, soit {per_call:?}/appel (acc={acc}, pour éviter que le compilateur n'élimine la boucle)"
+        );
+        assert!(per_call.as_nanos() < 1_300, "evaluate() ne doit plus coûter les 1,3 µs de l'ancienne implémentation");
     }
 }

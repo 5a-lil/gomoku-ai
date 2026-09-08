@@ -4,7 +4,19 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-chrono = "0.4.45"
 crossterm = "0.29.0"
-num-bigint = "0.5.1"
 ratatui = "0.30.2"
+
+# Profil de release optimisé pour la performance de la recherche (voir
+# DEFENSE.md, section "mesures de performance") : LTO complète et une seule
+# unité de codegen permettent à l'optimiseur d'inliner à travers les
+# frontières de module (négamax, évaluation incrémentale, table de
+# transposition). `overflow-checks = true` est un choix délibéré de sûreté
+# (section 6 du sujet : aucun débordement arithmétique ne doit pouvoir se
+# produire silencieusement) ; son coût mesuré est documenté dans DEFENSE.md.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "unwind"
+overflow-checks = true
